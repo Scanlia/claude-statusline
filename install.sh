@@ -12,7 +12,7 @@ mkdir -p "$CLAUDE_DIR"
 
 # Prefer the local copy when running inside a clone, otherwise fetch it.
 # Both files present means we really are in the repo, not just piped from curl.
-SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo)"
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo)"
 if [ -n "$SRC_DIR" ] && [ -f "$SRC_DIR/statusline-command.sh" ] && [ -f "$SRC_DIR/install.sh" ]; then
     cp "$SRC_DIR/statusline-command.sh" "$TARGET"
 else
