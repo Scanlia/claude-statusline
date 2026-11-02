@@ -9,10 +9,13 @@ SHOW_MODEL=1        # model name + effort level + fast-mode flag
 SHOW_CONTEXT=1      # context gauge, percentage, token count
 SHOW_COST=1         # session cost in USD
 SHOW_DIFF=1         # +added/-removed lines this session
-SHOW_LIMITS=1       # 5h / 7d rate-limit usage, countdown when high
-LIMIT_WARN=75       # show reset countdown once a limit passes this %
+SHOW_LIMITS=1       # 5h / 7d rate-limit gauges and usage
+LIMIT_WARN=75       # show reset countdown once a limit passes this % (when no pace hint)
+SHOW_PACE=1         # slow down / speed up hint from average burn since window opened
+PACE_LOW=80         # projected-at-reset % below which the hint says "speed up"
+PACE_MIN=5          # % of the window that must have elapsed before projecting
 USE_UNICODE=1       # 0 = plain ASCII separators and gauge
-GAUGE_CELLS=8       # width of the context gauge
+GAUGE_CELLS=8       # width of the context and rate-limit gauges
 # ---------------------------------------------------------------------------
 
 input=$(cat)
@@ -83,12 +86,42 @@ human_tokens() {
     else                                 printf '%d' "${t:-0}"; fi
 }
 
+NOW=$(date +%s)
+
+# 45m / 3h05m / 2d7h
+fmt_secs() {
+    local d=${1%%.*}
+    if   [ "$d" -lt 3600 ];  then printf '%dm' $((d/60))
+    elif [ "$d" -lt 86400 ]; then printf '%dh%02dm' $((d/3600)) $(((d%3600)/60))
+    else                          printf '%dd%dh' $((d/86400)) $(((d%86400)/3600)); fi
+}
+
 time_until() {
-    local now delta
-    now=$(date +%s); delta=$(( ${1%%.*} - now ))
+    local delta=$(( ${1%%.*} - NOW ))
     [ "$delta" -le 0 ] && return
-    if [ "$delta" -lt 3600 ]; then printf '%dm' $((delta/60))
-    else printf '%dh%02dm' $((delta/3600)) $(((delta%3600)/60)); fi
+    fmt_secs "$delta"
+}
+
+# Pace hint: extrapolate the average burn since the window opened to its reset.
+# Prints nothing early in the window, when one sample of usage is too noisy.
+pace() {  # pct reset_epoch window_secs
+    local pct=${1%%.*} reset=${2%%.*} win=$3 rem el proj
+    [ "$SHOW_PACE" = 1 ] && [ -n "$reset" ] || return
+    rem=$(( reset - NOW )); el=$(( win - rem ))
+    [ "$rem" -gt 0 ] && [ "$el" -ge $(( win * PACE_MIN / 100 )) ] || return
+    if [ "$pct" -ge 100 ]; then
+        printf '%sout%s %sresets %s%s' "$C_BAD" "$R" "$C_DIM" "$(fmt_secs "$rem")" "$R"
+        return
+    fi
+    proj=$(( pct * win / el ))
+    if [ "$proj" -gt 100 ]; then
+        printf '%sslow down%s %sout ~%s, resets %s%s' "$C_BAD" "$R" "$C_DIM" \
+            "$(fmt_secs $(( (100 - pct) * el / pct )))" "$(fmt_secs "$rem")" "$R"
+    elif [ "$proj" -lt "$PACE_LOW" ]; then
+        printf '%sspeed up%s %s~%d%% by reset %s%s' "$C_OK" "$R" "$C_DIM" "$proj" "$(fmt_secs "$rem")" "$R"
+    else
+        printf '%son pace ~%d%% by reset %s%s' "$C_DIM" "$proj" "$(fmt_secs "$rem")" "$R"
+    fi
 }
 
 # Filled portion coloured by load, remainder in a dark track.
@@ -143,17 +176,25 @@ if [ "$SHOW_DIFF" = 1 ] && { [ "${added:-0}" -gt 0 ] || [ "${removed:-0}" -gt 0 
 fi
 [ -n "$money" ] && seg+=("$money")
 
-# 5h 87% (1h27m) · 7d 33%
-if [ "$SHOW_LIMITS" = 1 ] && [ -n "$rl5" ]; then
-    l="${C_DIM}5h${R} $(pct_colour "$rl5")${rl5%%.*}%${R}"
-    if [ "${rl5%%.*}" -ge "$LIMIT_WARN" ] && [ -n "$rl5_reset" ]; then
-        left=$(time_until "$rl5_reset"); [ -n "$left" ] && l+=" ${C_DIM}(${left})${R}"
+# 5h ▰▰▰▰▰▰▱▱ 70% slow down out ~45m, resets 1h30m  7d ▰▰▰▰▰▰▱▱ 74% speed up ~79% by reset 10h
+# Each window renders independently: Claude Code may send seven_day without
+# five_hour (seen on 2.1.316), so neither may gate the other.
+limit_part() {  # label pct reset_epoch window_secs
+    local s="${C_DIM}$1${R} $(gauge "$2") $(pct_colour "$2")${2%%.*}%${R}" hint left
+    hint=$(pace "$2" "$3" "$4")
+    if [ -n "$hint" ]; then
+        s+=" $hint"
+    elif [ "${2%%.*}" -ge "$LIMIT_WARN" ] && [ -n "$3" ]; then
+        left=$(time_until "$3"); [ -n "$left" ] && s+=" ${C_DIM}(${left})${R}"
     fi
+    printf '%s' "$s"
+}
+if [ "$SHOW_LIMITS" = 1 ] && { [ -n "$rl5" ] || [ -n "$rl7" ]; }; then
+    l=""
+    [ -n "$rl5" ] && l=$(limit_part 5h "$rl5" "$rl5_reset" 18000)
     if [ -n "$rl7" ]; then
-        l+="  ${C_DIM}7d${R} $(pct_colour "$rl7")${rl7%%.*}%${R}"
-        if [ "${rl7%%.*}" -ge "$LIMIT_WARN" ] && [ -n "$rl7_reset" ]; then
-            left=$(time_until "$rl7_reset"); [ -n "$left" ] && l+=" ${C_DIM}(${left})${R}"
-        fi
+        [ -n "$l" ] && l+="  "
+        l+=$(limit_part 7d "$rl7" "$rl7_reset" 604800)
     fi
     seg+=("$l")
 fi
