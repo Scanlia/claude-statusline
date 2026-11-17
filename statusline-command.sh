@@ -14,6 +14,9 @@ LIMIT_WARN=75       # show reset countdown once a limit passes this % (when no p
 SHOW_PACE=1         # slow down / speed up hint from average burn since window opened
 PACE_LOW=80         # projected-at-reset % below which the hint says "speed up"
 PACE_MIN=5          # % of the window that must have elapsed before projecting
+PACE_SLEEP=1        # 7d pace leaves out nightly sleep (SLEEP_START..SLEEP_END, local time)
+SLEEP_START=23      # local hour sleep starts
+SLEEP_END=7         # local hour sleep ends
 USE_UNICODE=1       # 0 = plain ASCII separators and gauge
 GAUGE_CELLS=8       # width of the context and rate-limit gauges
 # ---------------------------------------------------------------------------
@@ -102,21 +105,73 @@ time_until() {
     fmt_secs "$delta"
 }
 
+# Nightly sleep in epoch terms: night d runs from local SLEEP_START on day d for
+# SLEEP_LEN seconds. The UTC offset is read once (no fork), so a DST change
+# inside the week shifts the nights by an hour at most.
+printf -v TZOFF '%(%z)T' -1
+TZOFF=$(( ${TZOFF:0:1}1 * (10#${TZOFF:1:2} * 3600 + 10#${TZOFF:3:2} * 60) ))
+SLEEP_LEN=$(( ((SLEEP_END - SLEEP_START + 24) % 24) * 3600 ))
+night_start() { NS=$(( $1 * 86400 + SLEEP_START * 3600 - TZOFF )); }
+
+# AWAKE = seconds in [a,b) outside sleep. The night containing `keep` (the
+# reset) counts as awake: when the window resets mid-night you can stay up to
+# use the rest of it.
+awake_secs() {  # a b keep
+    local a=$1 b=$2 keep=$3 d s e
+    AWAKE=$(( b - a ))
+    for (( d = (a + TZOFF) / 86400 - 1; d <= (b + TZOFF) / 86400; d++ )); do
+        night_start "$d"; s=$NS; e=$(( s + SLEEP_LEN ))
+        [ "$s" -lt "$keep" ] && [ "$keep" -lt "$e" ] && continue
+        [ "$s" -lt "$a" ] && s=$a
+        [ "$e" -gt "$b" ] && e=$b
+        [ "$e" -gt "$s" ] && AWAKE=$(( AWAKE - (e - s) ))
+    done
+}
+
+# WALL = wall-clock seconds from now until `need` more awake seconds have passed.
+awake_wall() {  # need keep
+    local need=$1 keep=$2 cur=$NOW d s e
+    for (( d = (NOW + TZOFF) / 86400 - 1; ; d++ )); do
+        night_start "$d"; s=$NS; e=$(( s + SLEEP_LEN ))
+        [ "$e" -le "$cur" ] && continue
+        [ "$s" -lt "$keep" ] && [ "$keep" -lt "$e" ] && continue
+        if [ "$s" -gt "$cur" ]; then
+            [ "$need" -le $(( s - cur )) ] && break
+            need=$(( need - (s - cur) ))
+        fi
+        cur=$e
+    done
+    WALL=$(( cur + need - NOW ))
+}
+
 # Pace hint: extrapolate the average burn since the window opened to its reset.
+# With skip_sleep=1 both the burn rate and the time left count awake hours only.
 # Prints nothing early in the window, when one sample of usage is too noisy.
-pace() {  # pct reset_epoch window_secs
-    local pct=${1%%.*} reset=${2%%.*} win=$3 rem el proj
+pace() {  # pct reset_epoch window_secs skip_sleep
+    local pct=${1%%.*} reset=${2%%.*} win=$3 rem el left total proj need
     [ "$SHOW_PACE" = 1 ] && [ -n "$reset" ] || return
-    rem=$(( reset - NOW )); el=$(( win - rem ))
-    [ "$rem" -gt 0 ] && [ "$el" -ge $(( win * PACE_MIN / 100 )) ] || return
+    rem=$(( reset - NOW ))
+    [ "$rem" -gt 0 ] || return
+    local sleepy=0
+    [ "$4" = 1 ] && [ "$PACE_SLEEP" = 1 ] && [ "$SLEEP_LEN" -gt 0 ] && sleepy=1
+    if [ "$sleepy" = 1 ]; then
+        awake_secs $(( reset - win )) "$NOW" "$reset"; el=$AWAKE
+        awake_secs "$NOW" "$reset" "$reset"; left=$AWAKE
+    else
+        el=$(( win - rem )); left=$rem
+    fi
+    total=$(( el + left ))
+    [ "$el" -gt 0 ] && [ "$el" -ge $(( total * PACE_MIN / 100 )) ] || return
     if [ "$pct" -ge 100 ]; then
         printf '%sout%s %sresets %s%s' "$C_BAD" "$R" "$C_DIM" "$(fmt_secs "$rem")" "$R"
         return
     fi
-    proj=$(( pct * win / el ))
+    proj=$(( pct * total / el ))
     if [ "$proj" -gt 100 ]; then
+        need=$(( (100 - pct) * el / pct ))
+        if [ "$sleepy" = 1 ]; then awake_wall "$need" "$reset"; need=$WALL; fi
         printf '%sslow down%s %sout ~%s, resets %s%s' "$C_BAD" "$R" "$C_DIM" \
-            "$(fmt_secs $(( (100 - pct) * el / pct )))" "$(fmt_secs "$rem")" "$R"
+            "$(fmt_secs "$need")" "$(fmt_secs "$rem")" "$R"
     elif [ "$proj" -lt "$PACE_LOW" ]; then
         printf '%sspeed up%s %s~%d%% by reset %s%s' "$C_OK" "$R" "$C_DIM" "$proj" "$(fmt_secs "$rem")" "$R"
     else
@@ -179,9 +234,9 @@ fi
 # 5h ▰▰▰▰▰▰▱▱ 70% slow down out ~45m, resets 1h30m  7d ▰▰▰▰▰▰▱▱ 74% speed up ~79% by reset 10h
 # Each window renders independently: Claude Code may send seven_day without
 # five_hour (seen on 2.1.316), so neither may gate the other.
-limit_part() {  # label pct reset_epoch window_secs
+limit_part() {  # label pct reset_epoch window_secs skip_sleep
     local s="${C_DIM}$1${R} $(gauge "$2") $(pct_colour "$2")${2%%.*}%${R}" hint left
-    hint=$(pace "$2" "$3" "$4")
+    hint=$(pace "$2" "$3" "$4" "$5")
     if [ -n "$hint" ]; then
         s+=" $hint"
     elif [ "${2%%.*}" -ge "$LIMIT_WARN" ] && [ -n "$3" ]; then
@@ -194,7 +249,7 @@ if [ "$SHOW_LIMITS" = 1 ] && { [ -n "$rl5" ] || [ -n "$rl7" ]; }; then
     [ -n "$rl5" ] && l=$(limit_part 5h "$rl5" "$rl5_reset" 18000)
     if [ -n "$rl7" ]; then
         [ -n "$l" ] && l+="  "
-        l+=$(limit_part 7d "$rl7" "$rl7_reset" 604800)
+        l+=$(limit_part 7d "$rl7" "$rl7_reset" 604800 1)
     fi
     seg+=("$l")
 fi

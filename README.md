@@ -35,10 +35,19 @@ minus 5 hours or 7 days) and projects it forward to the reset:
 | **speed up** (green) | you will finish under 80%, so there is room to spare | `20% speed up ~25% by reset 1h00m` |
 | **out** (red) | the window is used up | `100% out resets 40m` |
 
+For the 7 day window the hint leaves out sleep: the hours between `SLEEP_START`
+and `SLEEP_END` (23:00 to 07:00 local time by default) count neither towards
+your burn rate nor towards the time you have left, so a week holds about 112
+usable hours rather than 168. "out ~" is still given as wall-clock time from now,
+skipping the nights in between. The one exception is the night the window
+resets in: if the reset lands at 02:00, that night counts as awake time, since
+you can stay up to use the rest of the window before it resets. The 5 hour window
+always uses plain wall-clock time.
+
 It is an average over the whole window, not your burn in the last hour, so a
 heavy spurt after a quiet stretch will not flip it to "slow down" straight away.
-For the first 5% of a window (about 15 minutes of the 5 hour window, 8 hours of
-the week) one reading is too noisy to project from, so no hint is shown and the
+For the first 5% of a window (about 15 minutes of the 5 hour window, 5.6 awake
+hours of the week) one reading is too noisy to project from, so no hint is shown and the
 plain reset countdown appears instead once usage passes 75%.
 
 ## Install
@@ -97,6 +106,9 @@ per machine without touching the body:
 | `SHOW_PACE` | `1` | slow down / on pace / speed up hint for each window |
 | `PACE_LOW` | `80` | projected usage at reset below which the hint says "speed up" |
 | `PACE_MIN` | `5` | percentage of a window that must have elapsed before projecting |
+| `PACE_SLEEP` | `1` | leave nightly sleep out of the 7 day pace hint; `0` for plain wall-clock time |
+| `SLEEP_START` | `23` | local hour sleep starts |
+| `SLEEP_END` | `7` | local hour sleep ends |
 | `USE_UNICODE` | `1` | set to `0` for ASCII separators and gauges |
 | `GAUGE_CELLS` | `8` | width of the context and rate limit gauges |
 
